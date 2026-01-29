@@ -4,6 +4,7 @@
 # dependencies = [
 #     "requests>=2.28.0",
 #     "python-dotenv>=1.0.0",
+#     "beautifulsoup4>=4.12.0",
 # ]
 # ///
 """
@@ -22,12 +23,14 @@ Or pass keys directly:
 """
 
 import argparse
+import hashlib
 import os
 import re
 import sys
 from pathlib import Path
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
+from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 import requests
 
@@ -37,6 +40,120 @@ load_dotenv()
 
 BASE_URL = "https://api.mailjet.com/v3/REST/"
 SCRIPT_DIR = Path(__file__).parent.resolve()
+ASSETS_DIR = SCRIPT_DIR / "assets"
+
+# Domains that contain assets we should mirror (images, etc.)
+ASSET_DOMAINS = {
+    'mjt.lu',           # MailJet CDN
+    'mailjet.com',      # MailJet static assets
+}
+
+
+def should_mirror_url(url: str) -> bool:
+    """Check if a URL should be mirrored as a local asset."""
+    try:
+        parsed = urlparse(url)
+        if not parsed.scheme.startswith('http'):
+            return False
+        # Check if domain matches any asset domain
+        for domain in ASSET_DOMAINS:
+            if domain in parsed.netloc:
+                return True
+        return False
+    except Exception:
+        return False
+
+
+def get_asset_filename(url: str) -> str:
+    """Generate a unique filename for an asset URL."""
+    # Create a hash of the URL for uniqueness
+    url_hash = hashlib.md5(url.encode()).hexdigest()[:12]
+
+    # Try to extract a meaningful extension
+    parsed = urlparse(url)
+    path = parsed.path
+
+    # Handle MailJet CDN URLs like /img2/skqro/.../content
+    if '/content' in path or not '.' in path.split('/')[-1]:
+        # No clear extension, default to common image types
+        ext = '.png'
+    else:
+        ext = Path(path).suffix.lower()
+        if not ext or len(ext) > 5:
+            ext = '.png'
+
+    return f"{url_hash}{ext}"
+
+
+def download_asset(url: str, session: requests.Session = None) -> bytes | None:
+    """Download an asset from a URL."""
+    try:
+        sess = session or requests.Session()
+        response = sess.get(url, timeout=30)
+        response.raise_for_status()
+        return response.content
+    except Exception as e:
+        print(f"    Warning: Failed to download {url}: {e}")
+        return None
+
+
+def mirror_assets(html: str, dry_run: bool = False) -> tuple[str, int]:
+    """
+    Find all assets in HTML, download them, and rewrite URLs to local paths.
+    Returns (modified_html, asset_count).
+    """
+    soup = BeautifulSoup(html, 'html.parser')
+    assets_downloaded = 0
+    session = requests.Session()
+
+    # Ensure assets directory exists
+    if not dry_run:
+        ASSETS_DIR.mkdir(exist_ok=True)
+
+    # Find all elements with src attribute (images, etc.)
+    for tag in soup.find_all(src=True):
+        url = tag['src']
+        if should_mirror_url(url):
+            filename = get_asset_filename(url)
+            local_path = ASSETS_DIR / filename
+
+            if not dry_run:
+                # Download if not already cached
+                if not local_path.exists():
+                    content = download_asset(url, session)
+                    if content:
+                        local_path.write_bytes(content)
+                        assets_downloaded += 1
+
+                # Update HTML reference to local path
+                if local_path.exists():
+                    tag['src'] = f"assets/{filename}"
+            else:
+                assets_downloaded += 1
+
+    # Find all elements with background-image in style
+    for tag in soup.find_all(style=True):
+        style = tag['style']
+        urls = re.findall(r'url\(["\']?(https?://[^"\')\s]+)["\']?\)', style)
+        for url in urls:
+            if should_mirror_url(url):
+                filename = get_asset_filename(url)
+                local_path = ASSETS_DIR / filename
+
+                if not dry_run:
+                    if not local_path.exists():
+                        content = download_asset(url, session)
+                        if content:
+                            local_path.write_bytes(content)
+                            assets_downloaded += 1
+
+                    if local_path.exists():
+                        tag['style'] = style.replace(url, f"assets/{filename}")
+                        style = tag['style']  # Update for next iteration
+                else:
+                    assets_downloaded += 1
+
+    return str(soup), assets_downloaded
 
 
 def slugify(text: str) -> str:
@@ -157,10 +274,6 @@ def archive_campaign(client: MailJetClient, campaign: dict, dry_run: bool = Fals
     filename = f"{campaign_id}_{slug}.html"
     filepath = SCRIPT_DIR / filename
 
-    if dry_run:
-        print(f"  Would create: {filename}")
-        return True
-
     # Create HTML file with content
     # If there's HTML content, use it; otherwise wrap text in basic HTML
     if html_part:
@@ -181,8 +294,15 @@ def archive_campaign(client: MailJetClient, campaign: dict, dry_run: bool = Fals
 </body>
 </html>'''
 
+    # Mirror external assets and rewrite URLs
+    final_html, asset_count = mirror_assets(final_html, dry_run)
+
+    if dry_run:
+        print(f"  Would create: {filename} ({asset_count} assets)")
+        return True
+
     filepath.write_text(final_html, encoding='utf-8')
-    print(f"  Created: {filename}")
+    print(f"  Created: {filename} ({asset_count} assets mirrored)")
     return True
 
 
