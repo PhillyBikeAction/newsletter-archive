@@ -97,6 +97,45 @@ def download_asset(url: str, session: requests.Session = None) -> bytes | None:
         return None
 
 
+def clean_html(html: str) -> str:
+    """
+    Remove unnecessary elements from archived HTML:
+    - "View online version" links with [[PERMALINK]]
+    - Unsubscribe links with [[UNSUB_LINK_EN]]
+    - Replace [[EMAIL_TO]] with generic text
+    """
+    soup = BeautifulSoup(html, 'html.parser')
+
+    # Remove links with placeholder hrefs
+    placeholder_patterns = ['[[PERMALINK]]', '[[UNSUB_LINK_EN]]']
+    for pattern in placeholder_patterns:
+        for a in soup.find_all('a', href=pattern):
+            # Try to remove the parent paragraph/div if it only contains this link
+            parent = a.parent
+            if parent and parent.name in ('p', 'div', 'td', 'span'):
+                # Check if parent has only whitespace and this link
+                other_content = parent.get_text(strip=True).replace(a.get_text(strip=True), '').strip()
+                if not other_content:
+                    # Remove the whole parent element
+                    parent.decompose()
+                    continue
+            # Otherwise just remove the link
+            a.decompose()
+
+    # Replace [[EMAIL_TO]] with empty string or remove elements containing only it
+    for text in soup.find_all(string=re.compile(r'\[\[EMAIL_TO\]\]')):
+        new_text = text.replace('[[EMAIL_TO]]', '')
+        if new_text.strip():
+            text.replace_with(new_text)
+        else:
+            # If the element is now empty, try to remove parent
+            parent = text.parent
+            if parent and not parent.get_text(strip=True):
+                parent.decompose()
+
+    return str(soup)
+
+
 def mirror_assets(html: str, dry_run: bool = False) -> tuple[str, int]:
     """
     Find all assets in HTML, download them, and rewrite URLs to local paths.
@@ -293,6 +332,9 @@ def archive_campaign(client: MailJetClient, campaign: dict, dry_run: bool = Fals
 </pre>
 </body>
 </html>'''
+
+    # Clean up unnecessary elements (view online, unsubscribe, etc.)
+    final_html = clean_html(final_html)
 
     # Mirror external assets and rewrite URLs
     final_html, asset_count = mirror_assets(final_html, dry_run)
