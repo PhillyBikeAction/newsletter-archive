@@ -40,7 +40,8 @@ load_dotenv()
 
 BASE_URL = "https://api.mailjet.com/v3/REST/"
 SCRIPT_DIR = Path(__file__).parent.resolve()
-ASSETS_DIR = SCRIPT_DIR / "assets"
+ARCHIVE_DIR = SCRIPT_DIR / "archive"
+ASSETS_DIR = ARCHIVE_DIR / "assets"
 
 # Domains that contain assets we should mirror (images, etc.)
 ASSET_DOMAINS = {
@@ -145,9 +146,9 @@ def mirror_assets(html: str, dry_run: bool = False) -> tuple[str, int]:
     assets_downloaded = 0
     session = requests.Session()
 
-    # Ensure assets directory exists
+    # Ensure archive and assets directories exist
     if not dry_run:
-        ASSETS_DIR.mkdir(exist_ok=True)
+        ASSETS_DIR.mkdir(parents=True, exist_ok=True)
 
     # Find all elements with src attribute (images, etc.)
     for tag in soup.find_all(src=True):
@@ -207,7 +208,7 @@ def slugify(text: str) -> str:
 def get_existing_campaign_ids() -> set:
     """Get set of campaign IDs already archived in the directory."""
     existing_ids = set()
-    for html_file in SCRIPT_DIR.glob("*.html"):
+    for html_file in ARCHIVE_DIR.glob("*.html"):
         # Extract ID from filename pattern: {id}_{slug}.html
         match = re.match(r'^(\d+)_', html_file.name)
         if match:
@@ -311,7 +312,7 @@ def archive_campaign(client: MailJetClient, campaign: dict, dry_run: bool = Fals
     if not slug:
         slug = f'campaign-{campaign_id}'
     filename = f"{campaign_id}_{slug}.html"
-    filepath = SCRIPT_DIR / filename
+    filepath = ARCHIVE_DIR / filename
 
     # Create HTML file with content
     # If there's HTML content, use it; otherwise wrap text in basic HTML
