@@ -23,6 +23,7 @@ Or pass keys directly:
 """
 
 import argparse
+import csv
 import hashlib
 import os
 import re
@@ -134,6 +135,17 @@ def clean_html(html: str) -> str:
             if parent and not parent.get_text(strip=True):
                 parent.decompose()
 
+    # Remove link tags with href="null" (broken font/stylesheet references)
+    for link in soup.find_all('link', href='null'):
+        link.decompose()
+
+    # Remove @import url(null); from style tags
+    for style in soup.find_all('style'):
+        if style.string:
+            cleaned = re.sub(r'@import\s+url\(null\);?', '', style.string)
+            if cleaned != style.string:
+                style.string = cleaned
+
     return str(soup)
 
 
@@ -214,6 +226,224 @@ def get_existing_campaign_ids() -> set:
         if match:
             existing_ids.add(int(match.group(1)))
     return existing_ids
+
+
+def update_archive_index(filename: str, subject: str, date_sent: str):
+    """Add or update entry in archive_index.csv."""
+    from datetime import datetime
+
+    csv_path = SCRIPT_DIR / 'archive_index.csv'
+
+    # Convert ISO format date to CSV format if needed
+    # MailJet: "2024-01-15T09:00:00Z" -> CSV: "Jan 15, 2024 09:00 am"
+    try:
+        if 'T' in date_sent:
+            # Parse and convert to local/naive datetime
+            dt = datetime.fromisoformat(date_sent.replace('Z', '+00:00'))
+            # Remove timezone info to make it naive
+            dt = dt.replace(tzinfo=None)
+            # Format as CSV expects (e.g., "Jan 15, 2024 09:00 am")
+            # Note: %p gives uppercase, so convert AM/PM to lowercase
+            formatted = dt.strftime('%b %d, %Y %I:%M %p')
+            date_sent = formatted.replace(' AM', ' am').replace(' PM', ' pm')
+    except Exception as e:
+        print(f"  Warning: Could not parse date '{date_sent}': {e}")
+
+    # Read existing entries
+    existing_entries = {}
+    if csv_path.exists():
+        with open(csv_path, 'r', newline='') as f:
+            reader = csv.DictReader(f)
+            for row in reader:
+                existing_entries[row['filename']] = row
+
+    # Add or update this entry
+    existing_entries[filename] = {
+        'date_sent': date_sent,
+        'subject': subject,
+        'filename': filename
+    }
+
+    # Sort by date
+    def parse_date(entry):
+        try:
+            # Parse campaigns.csv format: "Jun 01, 2023 09:46 pm"
+            # All datetimes should be naive (no timezone) for comparison
+            return datetime.strptime(entry['date_sent'], '%b %d, %Y %I:%M %p')
+        except Exception as e:
+            # If parsing fails, return min datetime
+            return datetime.min
+
+    sorted_entries = sorted(existing_entries.values(), key=parse_date)
+
+    # Write back to CSV
+    with open(csv_path, 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=['date_sent', 'subject', 'filename'])
+        writer.writeheader()
+        writer.writerows(sorted_entries)
+
+    print(f"  Updated archive_index.csv")
+
+
+def generate_index_html():
+    """Generate index.html from archive_index.csv."""
+    from html import escape
+
+    csv_path = SCRIPT_DIR / 'archive_index.csv'
+    if not csv_path.exists():
+        print("Warning: archive_index.csv not found, skipping index.html generation")
+        return
+
+    # Read all newsletters from CSV
+    newsletters = []
+    with open(csv_path, 'r', newline='') as f:
+        reader = csv.DictReader(f)
+        newsletters = list(reader)
+
+    # Generate HTML
+    html = '''<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Philly Bike Action Newsletter Archive</title>
+    <style>
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background: #f5f5f5;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+            background: white;
+            padding: 40px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            border-radius: 8px;
+        }
+
+        h1 {
+            color: #007C89;
+            margin-bottom: 10px;
+            font-size: 2.5em;
+        }
+
+        .subtitle {
+            color: #666;
+            margin-bottom: 40px;
+            font-size: 1.1em;
+        }
+
+        .newsletter {
+            border-left: 4px solid #007C89;
+            padding: 20px;
+            margin-bottom: 30px;
+            background: #fafafa;
+            border-radius: 4px;
+        }
+
+        .newsletter-header {
+            margin-bottom: 15px;
+        }
+
+        .newsletter-subject {
+            font-size: 1.3em;
+            font-weight: 600;
+            color: #222;
+            margin-bottom: 6px;
+        }
+
+        .newsletter-subject a {
+            color: #007C89;
+            text-decoration: none;
+        }
+
+        .newsletter-subject a:hover {
+            text-decoration: underline;
+        }
+
+        .newsletter-date {
+            color: #666;
+            font-size: 0.9em;
+            font-weight: 500;
+        }
+
+        .newsletter-preview {
+            width: 100%;
+            height: 300px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            background: white;
+        }
+
+        .count {
+            text-align: center;
+            color: #999;
+            margin-top: 40px;
+            font-size: 0.9em;
+        }
+
+        @media (max-width: 600px) {
+            .container {
+                padding: 20px;
+            }
+
+            h1 {
+                font-size: 2em;
+            }
+
+            .newsletter-preview {
+                height: 250px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Philly Bike Action Newsletter Archive</h1>
+        <p class="subtitle">Complete archive of email campaigns from June 2023 to present</p>
+
+'''
+
+    # Add each newsletter
+    for newsletter in newsletters:
+        filename = escape(newsletter['filename'])
+        subject = escape(newsletter['subject'])
+        date = escape(newsletter['date_sent'])
+
+        html += f'''        <div class="newsletter">
+            <div class="newsletter-header">
+                <div class="newsletter-subject">
+                    <a href="{filename}" target="_blank">{subject}</a>
+                </div>
+                <div class="newsletter-date">{date}</div>
+            </div>
+            <iframe src="{filename}" class="newsletter-preview" sandbox="allow-same-origin"></iframe>
+        </div>
+
+'''
+
+    html += f'''        <div class="count">
+            {len(newsletters)} newsletters archived
+        </div>
+    </div>
+</body>
+</html>
+'''
+
+    # Write to archive directory
+    index_path = ARCHIVE_DIR / 'index.html'
+    index_path.write_text(html, encoding='utf-8')
+    print(f"Generated {index_path} with {len(newsletters)} newsletters")
 
 
 class MailJetClient:
@@ -346,6 +576,10 @@ def archive_campaign(client: MailJetClient, campaign: dict, dry_run: bool = Fals
 
     filepath.write_text(final_html, encoding='utf-8')
     print(f"  Created: {filename} ({asset_count} assets mirrored)")
+
+    # Update archive index CSV
+    update_archive_index(filename, subject, sent_at)
+
     return True
 
 
@@ -533,6 +767,11 @@ def main():
             failed += 1
 
     print(f"\nDone! Archived: {archived}, Failed: {failed}")
+
+    # Regenerate index.html if any campaigns were processed
+    if archived > 0 or not args.dry_run:
+        print()
+        generate_index_html()
 
 
 if __name__ == '__main__':
