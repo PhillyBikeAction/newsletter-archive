@@ -27,7 +27,7 @@ jobs:
       - name: Check for changes
         id: changes
         run: |
-          git add archive/
+          git add archive/ archive_index.csv
           if git diff --staged --quiet; then
             echo "has_changes=false" >> "$GITHUB_OUTPUT"
           else
