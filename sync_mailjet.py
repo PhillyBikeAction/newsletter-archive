@@ -43,6 +43,7 @@ BASE_URL = "https://api.mailjet.com/v3/REST/"
 SCRIPT_DIR = Path(__file__).parent.resolve()
 ARCHIVE_DIR = SCRIPT_DIR / "archive"
 ASSETS_DIR = ARCHIVE_DIR / "assets"
+IGNORED_CAMPAIGN_IDS_FILE = SCRIPT_DIR / "ignored_campaign_ids.txt"
 
 # Domains that contain assets we should mirror (images, etc.)
 ASSET_DOMAINS = {
@@ -215,6 +216,24 @@ def slugify(text: str) -> str:
     text = re.sub(r'[-\s]+', '-', text)
     text = text.strip('-')
     return text
+
+
+def load_ignored_campaign_ids() -> set[int]:
+    """Read one campaign draft ID per line, allowing blank lines and # comments."""
+    ignored_ids = set()
+    for line_number, line in enumerate(
+        IGNORED_CAMPAIGN_IDS_FILE.read_text(encoding='utf-8').splitlines(), start=1
+    ):
+        value = line.split('#', 1)[0].strip()
+        if not value:
+            continue
+        if not re.fullmatch(r'[0-9]+', value) or int(value) <= 0:
+            raise ValueError(
+                f"{IGNORED_CAMPAIGN_IDS_FILE}:{line_number}: "
+                f"expected a positive campaign ID, got {value!r}"
+            )
+        ignored_ids.add(int(value))
+    return ignored_ids
 
 
 def get_existing_campaign_ids() -> set:
@@ -615,6 +634,11 @@ def main():
 
     args = parser.parse_args()
 
+    try:
+        ignored_ids = load_ignored_campaign_ids()
+    except (OSError, ValueError) as e:
+        parser.error(str(e))
+
     if not args.api_key or not args.api_secret:
         print("Error: MailJet API credentials required.")
         print("Set MJ_APIKEY_PUBLIC and MJ_APIKEY_PRIVATE environment variables,")
@@ -734,8 +758,13 @@ def main():
     campaigns = client.get_sent_campaigns()
     print(f"Found {len(campaigns)} sent campaigns")
 
-    # Filter to only new campaigns
-    new_campaigns = [c for c in campaigns if c.get('ID') not in existing_ids]
+    # Ignore configured IDs even when --force bypasses the existing archive check.
+    ignored_count = sum(c.get('ID') in ignored_ids for c in campaigns)
+    print(f"Ignoring {ignored_count} campaigns by ID")
+    new_campaigns = [
+        c for c in campaigns
+        if c.get('ID') not in ignored_ids and c.get('ID') not in existing_ids
+    ]
     print(f"New campaigns to archive: {len(new_campaigns)}")
 
     if not new_campaigns:
@@ -769,7 +798,7 @@ def main():
     print(f"\nDone! Archived: {archived}, Failed: {failed}")
 
     # Regenerate index.html if any campaigns were processed
-    if archived > 0 or not args.dry_run:
+    if not args.dry_run:
         print()
         generate_index_html()
 

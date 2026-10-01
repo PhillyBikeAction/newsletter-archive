@@ -1,0 +1,3 @@
+# MailJet campaign draft IDs to skip, one per line.
+# These are the numeric prefixes of archived filenames.
+15112258  # Test Organizer Blast — TEST - no ACTION required (2026-09-22)
